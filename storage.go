@@ -93,18 +93,21 @@ func (rs *RedisStorage) Save(r *PollenReport) error {
 		return err
 	}
 
-	key := r.SubRegion
+	normalizedRegion := normalizeString(r.Region)
+	normalizedSubregion := normalizeString(r.SubRegion)
+
+	key := normalizedSubregion
 	// Not all regions have sub regions. In this case, we want to
 	// use the region name as the key instead
 	if key == "" {
-		key = r.Region
+		key = normalizedRegion
 	}
 	key = rs.makeKey("report:" + key)
 	rs.client.Set(key, json, 0)
 
 	// Add the region to the reports set so we can later fetch
 	// all supported regions.
-	rs.client.SAdd(rs.makeKey("regions"), normalizeString(r.Region))
+	rs.client.SAdd(rs.makeKey("regions"), normalizedRegion)
 
 	// Add the subregion to the subregion set so we can later
 	// provide the user with human readable names of all subregions
@@ -116,18 +119,17 @@ func (rs *RedisStorage) Save(r *PollenReport) error {
 	// which would always result in an array of length 1. And that
 	// is annoying to deal with.
 	if r.SubRegion != "" {
-		rs.client.SAdd(rs.makeKey("subregions"), normalizeString(r.SubRegion))
+		rs.client.SAdd(rs.makeKey("subregions"), normalizedSubregion)
 	} else {
-		rs.client.SAdd(rs.makeKey("subregions"), normalizeString(r.Region))
+		rs.client.SAdd(rs.makeKey("subregions"), normalizedRegion)
 	}
 
-	// Tag the subregion with the region tag so we can
-	// later query all reports for a region easily.
-	if r.SubRegion != "" {
-		rs.client.SAdd(rs.makeKey("region:"+r.Region+":subregions"), normalizeString(r.SubRegion))
-	}
-	// Add the key to the reports set so we can fetch all
-	// supported regions.
+	// Tag this report with this region so we can easily look up
+	// all reports for a region
+	rs.client.SAdd(rs.makeKey("region:"+normalizedRegion+":reports"), key)
+
+	// Add the key to the list of all reports so we can easily fetch
+	// all reports
 	rs.client.SAdd(rs.makeKey("reports"), key)
 
 	return nil
@@ -140,19 +142,19 @@ func (rs *RedisStorage) AllReports() ([]*PollenReport, error) {
 		return nil, err
 	}
 
+	vals, err := rs.client.MGet(keys...).Result()
+	if err != nil {
+		log.Printf("[storage] couldn't fetch reports: %s", err)
+		return nil, err
+	}
+
 	reports := make([]*PollenReport, len(keys))
 	for i := 0; i < len(keys); i++ {
-		strVal, err := rs.client.Get(keys[i]).Result()
+		pr, err := parseReport(vals[i])
 		if err != nil {
 			return nil, err
 		}
-
-		var pr PollenReport
-		if err := json.Unmarshal([]byte(strVal), &pr); err != nil {
-			log.Printf("[storage] unable to unmarshal data: %q", err.Error())
-			return nil, err
-		}
-		reports[i] = &pr
+		reports[i] = pr
 	}
 
 	return reports, nil
@@ -187,7 +189,7 @@ func (rs *RedisStorage) GetBySubregion(subregion string) (*PollenReport, error) 
 // GetByRegion returns the pollen reports of all subregions
 // of the provided region.
 func (rs *RedisStorage) GetByRegion(region string) ([]*PollenReport, error) {
-	regions, err := rs.client.SMembers(rs.makeKey("region:" + region + ":subregions")).Result()
+	reportKeys, err := rs.client.SMembers(rs.makeKey("region:" + normalizeString(region) + ":reports")).Result()
 	if err != nil {
 		if err == redis.Nil {
 			return nil, ErrNotFound
@@ -196,15 +198,15 @@ func (rs *RedisStorage) GetByRegion(region string) ([]*PollenReport, error) {
 		return nil, err
 	}
 
-	// Some regions don't have subregions. In these cases we
-	// simply treat the region as its own singular subregion
-	if len(regions) == 0 {
-		regions = []string{region}
+	reportVals, err := rs.client.MGet(reportKeys...).Result()
+	if err != nil {
+		log.Printf("[storage] couldn't fetch reports: %q", err)
+		return nil, err
 	}
 
-	reports := make([]*PollenReport, len(regions))
-	for i := 0; i < len(regions); i++ {
-		r, err := rs.GetBySubregion(regions[i])
+	reports := make([]*PollenReport, len(reportKeys))
+	for i := 0; i < len(reportVals); i++ {
+		r, err := parseReport(reportVals[i])
 		if err != nil {
 			return nil, err
 		}
@@ -238,4 +240,18 @@ func normalizeString(s string) string {
 	s = keyRemoveRegexp.ReplaceAllLiteralString(s, "")
 	s = keyReplaceRegexp.ReplaceAllLiteralString(s, "_")
 	return s
+}
+
+func parseReport(report interface{}) (*PollenReport, error) {
+	s, ok := report.(string)
+	if !ok {
+		return nil, errors.New("[storage] couldn't cast report to string. this should never happen")
+	}
+
+	var r PollenReport
+	if err := json.Unmarshal([]byte(s), &r); err != nil {
+		return nil, err
+	}
+
+	return &r, nil
 }
