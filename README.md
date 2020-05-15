@@ -8,7 +8,7 @@ The API is using data provided by the Deutscher Wetterdienst (DWD). The raw data
 
 ## Running the server
 
-Build the project by either running `make dist` (builds for linux/arm by default) or by running `go build -o dist/pollen-api`.
+Build the project by either running `make dist` (builds for linux/amd64 by default) or by running `go build -o dist/pollen-api`.
 
 Start the server by executing the binary
 
